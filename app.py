@@ -8,57 +8,56 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. 配置與時區 ---
-st.set_page_config(page_title="SMC Multi-Source Matrix", layout="wide")
+st.set_page_config(page_title="SMC Stable Matrix", layout="wide")
 st_autorefresh(interval=30000, key="global_sync") 
 tw_tz = pytz.timezone('Asia/Taipei')
 
-# 初始化幣安
+# 初始化幣安 (Binance)
 exchange = ccxt.binance({'enableRateLimit': True})
 
 # --- 2. 記憶功能 ---
 if "active_items" not in st.session_state: 
     st.session_state.active_items = ["BTC/USDT", "GC=F"]
 
-# --- 3. 頂部「全展開打勾」面板 ---
-st.title("⚡ SMC 全球實時監控矩陣 V18")
+# --- 3. 頂部打勾面板 ---
+st.title("⚡ SMC 實時監控矩陣 (穩定修復版)")
 now_tw = datetime.now(tw_tz)
-st.info(f"🇹🇼 台北時間: `{now_tw.strftime('%H:%M:%S')}` | 混合數據源: Binance & Yahoo Finance")
+st.info(f"🇹🇼 台北時間: `{now_tw.strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 風控區
 with st.sidebar:
     st.header("⚙️ 風控設定")
     bal = st.number_input("本金 (USD)", value=10000)
     risk = st.slider("單筆風險 (%)", 0.1, 5.0, 1.0)
-    st.divider()
-    st.caption("設定會自動緩存，每人獨立。")
 
 st.markdown("### 🔍 監控清單 (直接打勾)")
-# 定義商品清單
 all_items = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "GC=F", "EURUSD=X", "GBPUSD=X", "NQ=F"]
 cols_check = st.columns(len(all_items))
 current_selected = []
 
 for i, item in enumerate(all_items):
     with cols_check[i]:
-        # 實現真正的打勾介面
         is_checked = st.checkbox(item, value=(item in st.session_state.active_items))
         if is_checked: current_selected.append(item)
 st.session_state.active_items = current_selected
 
-# --- 4. 混合數據抓取引擎 ---
+# --- 4. 強化版數據抓取引擎 ---
 @st.cache_data(ttl=20)
 def get_data(symbol):
     try:
-        if "/" in symbol: # 虛擬幣：走幣安 CCXT
+        if "/" in symbol: # 幣安數據
             bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
             df = pd.DataFrame(bars, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df_htf_bars = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
             df_htf = pd.DataFrame(df_htf_bars, columns=['t', 'O', 'H', 'L', 'Close', 'V'])
-        else: # 黃金/外匯：走 Yahoo Finance
+        else: # Yahoo 數據
             df = yf.download(symbol, period='30d', interval='1h', auto_adjust=True, progress=False)
             df_htf = yf.download(symbol, period='60d', interval='4h', auto_adjust=True, progress=False)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             if isinstance(df_htf.columns, pd.MultiIndex): df_htf.columns = df_htf.columns.get_level_values(0)
+
+        # --- 核心防禦：檢查 DataFrame 是否為空 ---
+        if df.empty or len(df) < 5 or df_htf.empty:
+            return None
 
         # 統一計算指標
         df['EMA'] = df['Close'].astype(float).ewm(span=200, adjust=False).mean()
@@ -67,7 +66,9 @@ def get_data(symbol):
         htf_trend = 1 if float(df_htf['Close'].iloc[-1]) > df_htf['EMA'].iloc[-1] else -1
         
         return {"df": df, "htf": htf_trend}
-    except: return None
+    except Exception as e:
+        print(f"Error fetching {symbol}: {e}")
+        return None
 
 # --- 5. 渲染矩陣 ---
 st.divider()
@@ -78,14 +79,16 @@ else:
     for i, sym in enumerate(st.session_state.active_items):
         with matrix_cols[i % 3]:
             data = get_data(sym)
-            if data:
+            
+            # 這裡檢查數據是否獲取成功
+            if data is not None:
                 df, htf = data['df'], data['htf']
-                last = df.iloc[-1]
+                last = df.iloc[-1] # 此時保證有數據，不會報 Index Error
                 curr_p, atr = float(last['Close']), float(last['ATR'])
                 
                 with st.container():
                     st.markdown(f"#### {sym}")
-                    st.write(f"即時價: **{curr_p:.4f}** | 4H趨勢: {'📈 多' if htf==1 else '📉 空'}")
+                    st.write(f"即時價: **{curr_p:.4f}** | 趨勢: {'📈 多' if htf==1 else '📉 空'}")
                     
                     bull_g = float(last['Low']) - float(df.iloc[-3]['High'])
                     bear_g = float(df.iloc[-3]['Low']) - float(last['High'])
@@ -106,4 +109,6 @@ else:
                         risk_usd = bal * (risk/100)
                         pos_size = risk_usd / abs(curr_p - sl)
                         st.code(f"量: {pos_size:.4f}\nSL: {sl:.4f}\nTP: {curr_p + (curr_p-sl)*3:.4f}")
-                st.divider()
+            else:
+                st.error(f"❌ {sym}: 數據抓取失敗 (休市或代碼錯誤)")
+            st.divider()
