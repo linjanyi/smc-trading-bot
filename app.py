@@ -7,29 +7,32 @@ import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. 配置與刷新 ---
-st.set_page_config(page_title="SMC Strategy Matrix V23", layout="wide")
-st_autorefresh(interval=30000, key="v23_sync") 
+# --- 1. 配置與自動刷新 ---
+st.set_page_config(page_title="SMC Ultimate Matrix V24", layout="wide")
+st_autorefresh(interval=30000, key="v24_sync") 
 tw_tz = pytz.timezone('Asia/Taipei')
 
-# --- 2. 數據對照表 ---
+# --- 2. 數據對照表 (含中文名稱) ---
 crypto_info = {
     "BTCUSDT": "比特幣 (BTC)", "ETHUSDT": "乙太幣 (ETH)", "SOLUSDT": "索拉納 (SOL)",
-    "BNBUSDT": "幣安幣 (BNB)", "DOGEUSDT": "狗狗幣 (DOGE)", "XRPUSDT": "瑞波幣 (XRP)"
+    "BNBUSDT": "幣安幣 (BNB)", "DOGEUSDT": "狗狗幣 (Doge)", "XRPUSDT": "瑞波幣 (XRP)",
+    "ADAUSDT": "艾達幣 (ADA)", "AVAXUSDT": "雪崩幣 (AVAX)"
 }
 forex_info = {
-    "GC=F": "黃金 (Gold)", "NQ=F": "納指 (Nasdaq)", "CL=F": "原油 (Oil)",
-    "EURUSD=X": "歐美 (EUR/USD)", "GBPUSD=X": "鎊美 (GBP/USD)", "USDJPY=X": "美日 (USD/JPY)"
+    "GC=F": "黃金 (Gold)", "SI=F": "白銀 (Silver)", "NQ=F": "納指 (Nasdaq)", 
+    "CL=F": "原油 (Oil)", "EURUSD=X": "歐美 (EUR/USD)", "GBPUSD=X": "鎊美 (GBP/USD)",
+    "USDJPY=X": "美日 (USD/JPY)", "ES=F": "標普500 (S&P)"
 }
 
-# --- 3. 記憶功能 ---
-if "active_cryptos" not in st.session_state: st.session_state.active_cryptos = ["BTCUSDT"]
-if "active_forex" not in st.session_state: st.session_state.active_forex = ["GC=F"]
+# --- 3. 記憶功能 (Session State) ---
+if "active_cryptos" not in st.session_state: st.session_state.active_cryptos = ["BTCUSDT", "ETHUSDT"]
+if "active_forex" not in st.session_state: st.session_state.active_forex = ["GC=F", "NQ=F"]
 
 # --- 4. 數據抓取與 30D 回測引擎 ---
 def fetch_binance(symbol, interval='1h'):
     endpoints = [f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=500",
-                 f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=500"]
+                 f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=500",
+                 f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit=500"]
     for url in endpoints:
         try:
             res = requests.get(url, timeout=2)
@@ -42,22 +45,19 @@ def fetch_binance(symbol, interval='1h'):
         except: continue
     return pd.DataFrame()
 
-@st.cache_data(ttl=600) # 回測數據每 10 分鐘計算一次即可，節省效能
+@st.cache_data(ttl=600)
 def get_backtest_stats(df, rr=3.0):
-    if df is None or df.empty or len(df) < 50: return 0, 0
-    temp_df = df.copy()
-    temp_df['EMA'] = temp_df['Close'].ewm(span=200, adjust=False).mean()
-    # 簡化版 SMC 訊號模擬
-    bull = (temp_df['Low'] > temp_df['High'].shift(2)) & (temp_df['Close'] > temp_df['EMA'])
-    bear = (temp_df['High'] < temp_df['Low'].shift(2)) & (temp_df['Close'] < temp_df['EMA'])
-    temp_df['Sig'] = 0
-    temp_df.loc[bull, 'Sig'], temp_df.loc[bear, 'Sig'] = 1, -1
-    
-    # 計算盈虧
-    rets = (temp_df['Sig'].shift(1) * temp_df['Close'].pct_change()).dropna()
-    final_rets = rets.clip(lower=-0.005, upper=0.005 * rr) # 模擬止損與止盈
-    total_trades = len(final_rets[final_rets != 0])
-    wr = (len(final_rets[final_rets > 0]) / total_trades * 100) if total_trades > 0 else 0
+    if df is None or df.empty or len(df) < 50: return 0.0, 0.0
+    temp = df.copy()
+    temp['EMA'] = temp['Close'].ewm(span=200, adjust=False).mean()
+    bull = (temp['Low'] > temp['High'].shift(2)) & (temp['Close'] > temp['EMA'])
+    bear = (temp['High'] < temp['Low'].shift(2)) & (temp['Close'] < temp['EMA'])
+    temp['Sig'] = 0
+    temp.loc[bull, 'Sig'], temp.loc[bear, 'Sig'] = 1, -1
+    rets = (temp['Sig'].shift(1) * temp['Close'].pct_change()).dropna()
+    final_rets = rets.clip(lower=-0.005, upper=0.005 * rr)
+    total = len(final_rets[final_rets != 0])
+    wr = (len(final_rets[final_rets > 0]) / total * 100) if total > 0 else 0.0
     profit = (np.prod(1 + final_rets) - 1) * 100
     return wr, profit
 
@@ -74,36 +74,47 @@ def get_analysis_data(symbol, is_crypto=True):
             if isinstance(df_htf.columns, pd.MultiIndex): df_htf.columns = df_htf.columns.get_level_values(0)
         
         if df.empty or df_htf.empty: return None
-        
-        # 指標計算
         df['EMA'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         df_htf['EMA'] = df_htf['Close'].astype(float).ewm(span=200, adjust=False).mean()
         htf_trend = 1 if float(df_htf['Close'].iloc[-1]) > df_htf['EMA'].iloc[-1] else -1
-        
         wr, profit = get_backtest_stats(df)
         return {"df": df, "htf": htf_trend, "wr": wr, "profit": profit}
     except: return None
 
-# --- 5. 介面渲染 ---
-st.title("🏹 SMC 全球量化導航 V23")
-st.info(f"🇹🇼 台北時間: `{datetime.now(tw_tz).strftime('%H:%M:%S')}` | 狀態: 30D 勝率統計已回歸")
+# --- 5. 介面渲染：打勾區塊回歸主頁 ---
+st.title("🏹 SMC 全球量化導航 V24")
+now_tw = datetime.now(tw_tz)
+st.info(f"🇹🇼 台北時間: `{now_tw.strftime('%H:%M:%S')}` | 狀態: 30D 勝率回測與主頁勾選已同步")
 
+# 風控 (保留在側邊欄)
 with st.sidebar:
-    st.header("💰 風控設定")
+    st.header("💰 帳戶設定")
     bal = st.number_input("總本金 (USD)", value=10000)
     risk = st.slider("單筆風險 (%)", 0.1, 5.0, 1.0)
+    st.divider()
+    st.caption("每個人的設定獨立記憶。")
 
-# 橫向打勾選單 (帶中文)
-st.markdown("### 🌌 虛擬幣監控")
-c_sel = [s for s, n in crypto_info.items() if st.sidebar.checkbox(f"{s} ({n})", value=(s in st.session_state.active_cryptos))]
-st.session_state.active_cryptos = c_sel # 這裡簡化為放在側邊欄，避免主頁太亂
+# --- 主頁打勾選單區 ---
+st.markdown("### 🌌 虛擬幣監控 (幣安實時)")
+c_cols = st.columns(4)
+new_active_cryptos = []
+for i, (sym, name) in enumerate(crypto_info.items()):
+    with c_cols[i % 4]:
+        if st.checkbox(f"{sym}\n({name})", value=(sym in st.session_state.active_cryptos), key=f"c_{sym}"):
+            new_active_cryptos.append(sym)
+st.session_state.active_cryptos = new_active_cryptos
 
-st.markdown("### 💵 外匯與商品")
-f_sel = [s for s, n in forex_info.items() if st.sidebar.checkbox(f"{s} ({n})", value=(s in st.session_state.active_forex))]
-st.session_state.active_forex = f_sel
+st.markdown("### 💵 外匯與商品監控 (Yahoo)")
+f_cols = st.columns(4)
+new_active_forex = []
+for i, (sym, name) in enumerate(forex_info.items()):
+    with f_cols[i % 4]:
+        if st.checkbox(f"{sym}\n({name})", value=(sym in st.session_state.active_forex), key=f"f_{sym}"):
+            new_active_forex.append(sym)
+st.session_state.active_forex = new_active_forex
 
-# --- 6. 矩陣渲染 ---
+# --- 6. 渲染訊號矩陣 ---
 def render_matrix(items, is_crypto):
     if not items: return
     cols = st.columns(3)
@@ -118,24 +129,30 @@ def render_matrix(items, is_crypto):
                 
                 with st.container():
                     st.markdown(f"#### {sym} ({name})")
-                    st.write(f"📈 **30D 勝率: {wr:.1f}%** | 獲利: **{profit:.1f}%**")
-                    st.write(f"價格: `{curr_p:.4f}` | 趨勢: {'📈 多' if htf==1 else '📉 空'}")
+                    # 重新顯示勝率與獲利
+                    st.write(f"📊 **30D 勝率: {wr:.1f}%** | 獲利: **{profit:.1f}%**")
+                    st.write(f"價格: `{curr_p:.4f}` | 4H 趨勢: {'📈 多' if htf==1 else '📉 空'}")
                     
                     bull_g = float(last['Low']) - float(df.iloc[-3]['High'])
                     bear_g = float(df.iloc[-3]['Low']) - float(last['High'])
                     
+                    sig = None
                     if bull_g > (atr*0.5) and curr_p > last['EMA']:
-                        st.success("🔥 強力共振多單" if htf==1 else "⚠️ 逆勢多單")
-                        sl = curr_p - (atr * 2)
-                        size = (bal * (risk/100)) / abs(curr_p - sl)
-                        st.code(f"量: {size:.4f}\nSL: {sl:.4f}\nTP: {curr_p+(curr_p-sl)*3:.4f}")
+                        sig, status = "BUY", ("🔥 強力多單" if htf==1 else "⚠️ 逆勢多單")
+                        st.success(status); sl = curr_p - (atr * 2)
                     elif bear_g > (atr*0.5) and curr_p < last['EMA']:
-                        st.error("🔥 強力共振空單" if htf==-1 else "⚠️ 逆勢空單")
-                        sl = curr_p + (atr * 2)
-                        size = (bal * (risk/100)) / abs(curr_p - sl)
-                        st.code(f"量: {size:.4f}\nSL: {sl:.4f}\nTP: {curr_p-(sl-curr_p)*3:.4f}")
+                        sig, status = "SELL", ("🔥 強力空單" if htf==-1 else "⚠️ 逆勢空單")
+                        st.error(status); sl = curr_p + (atr * 2)
                     else: st.info("🔎 監控中...")
-                st.divider()
 
+                    if sig:
+                        risk_usd = bal * (risk/100)
+                        pos_size = risk_usd / abs(curr_p - sl)
+                        st.code(f"量: {pos_size:.4f}\nSL: {sl:.4f}\nTP: {curr_p + (curr_p-sl)*3:.4f}")
+            else: st.error(f"❌ {sym} 數據獲取中...")
+            st.divider()
+
+st.divider()
+st.subheader("🚀 實時策略矩陣")
 render_matrix(st.session_state.active_cryptos, True)
 render_matrix(st.session_state.active_forex, False)
