@@ -7,8 +7,8 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. 配置與刷新 ---
-st.set_page_config(page_title="SMC Stable Terminal V31", layout="wide")
-st_autorefresh(interval=60000, key="v31_sync") 
+st.set_page_config(page_title="SMC AI-Stable V32", layout="wide")
+st_autorefresh(interval=60000, key="v32_sync") 
 tw_tz = pytz.timezone('Asia/Taipei')
 
 # --- 2. 穩定版數據對照表 (統一 Yahoo 格式) ---
@@ -24,50 +24,64 @@ forex_info = {
 if "active_cryptos" not in st.session_state: st.session_state.active_cryptos = ["BTC-USD", "ETH-USD"]
 if "active_forex" not in st.session_state: st.session_state.active_forex = ["GC=F"]
 
-# --- 3. 穩定數據引擎 (100% Yahoo Finance) ---
+# --- 3. AI 最佳化引擎 (Backtest Scanner) ---
+@st.cache_data(ttl=600)
+def find_best_rr_v32(df):
+    """AI 掃描器：找出過去30天獲利最高的盈虧比"""
+    if df is None or df.empty or len(df) < 50: return 3.0, 0.0, 0.0
+    rr_options = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
+    best_rr, max_profit, best_wr = 3.0, -999.0, 0.0
+    
+    temp = df.copy()
+    temp['EMA'] = temp['Close'].ewm(span=200, adjust=False).mean()
+    # SMC 訊號模擬
+    bull = (temp['Low'] > temp['High'].shift(2)) & (temp['Close'] > temp['EMA'])
+    bear = (temp['High'] < temp['Low'].shift(2)) & (temp['Close'] < temp['EMA'])
+    temp['Sig'] = 0
+    temp.loc[bull, 'Sig'], temp.loc[bear, 'Sig'] = 1, -1
+    rets_raw = (temp['Sig'].shift(1) * temp['Close'].pct_change()).dropna()
+
+    for r in rr_options:
+        # 模擬：輸賠 0.5%，贏賺 0.5% * r
+        final_rets = rets_raw.apply(lambda x: 0.005 * r if x > 0 else (-0.005 if x < 0 else 0))
+        profit = (np.prod(1 + final_rets) - 1) * 100
+        total = len(final_rets[final_rets != 0])
+        wr = (len(final_rets[final_rets > 0]) / total * 100) if total > 0 else 0
+        if profit > max_profit:
+            max_profit, best_rr, best_wr = profit, r, wr
+    return best_rr, max_profit, best_wr
+
 @st.cache_data(ttl=60)
-def get_analysis_stable(symbol):
+def get_analysis_v32(symbol):
     try:
-        # 抓取 1H 與 4H 數據
         df = yf.download(symbol, period='30d', interval='1h', auto_adjust=True, progress=False)
         df_h = yf.download(symbol, period='60d', interval='4h', auto_adjust=True, progress=False)
-        
-        # 修正 yfinance 多重索引問題
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
         
         if df.empty or len(df) < 50: return None
-
-        # 指標計算
         df['EMA'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         
-        # 4H 趨勢判定
         htf_ema = df_h['Close'].ewm(span=200, adjust=False).mean()
         htf_trend = 1 if df_h['Close'].iloc[-1] > htf_ema.iloc[-1] else -1
         
-        # 30天勝率簡單統計 (RR=3)
-        temp = df.copy()
-        sig = (temp['Low'] > temp['High'].shift(2)) & (temp['Close'] > temp['EMA'])
-        temp['Ret'] = np.where(sig.shift(1), (temp['Close']/temp['Open']-1).clip(-0.005, 0.015), 0)
-        total_trades = len(temp[temp['Ret']!=0])
-        wr = (len(temp[temp['Ret']>0])/total_trades*100) if total_trades > 0 else 0
-        prof = temp['Ret'].sum() * 100
-        
-        return {"df": df, "htf": htf_trend, "wr": wr, "pr": prof}
-    except:
-        return None
+        # 呼叫 AI 優化引擎
+        best_rr, max_p, wr = find_best_rr_v32(df)
+        return {"df": df, "htf": htf_trend, "best_rr": best_rr, "max_p": max_p, "wr": wr}
+    except: return None
 
 # --- 4. 介面渲染 ---
-st.title("🛡️ SMC 全球監控終端 V31")
-st.caption(f"🕒 數據源：Yahoo Finance (穩定版) | 台北時間: {datetime.now(tw_tz).strftime('%H:%M:%S')}")
+st.title("🏹 SMC AI 全球監控 V32 (穩定版)")
+st.caption(f"🕒 台北時間: {datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')} | 數據源: Yahoo Finance")
 
-# 側邊欄風控
 with st.sidebar:
-    st.header("⚙️ 參數設定")
+    st.header("⚙️ 設定")
     bal = st.number_input("本金 (USD)", value=10000)
     risk = st.slider("風險 (%)", 0.1, 5.0, 1.0)
-    rr = st.slider("盈虧比 (R/R)", 1.5, 5.0, 3.0, 0.5)
+    st.divider()
+    manual_rr = st.toggle("手動覆蓋 AI 盈虧比", value=False)
+    user_rr = st.select_slider("手動 R/R", options=[1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0], value=3.0, disabled=not manual_rr)
 
 # --- 橫向打勾區 ---
 st.write("### 🌌 虛擬幣監控")
@@ -88,44 +102,41 @@ for i, (s, n) in enumerate(forex_info.items()):
             new_f.append(s)
 st.session_state.active_forex = new_f
 
-# --- 5. 渲染訊號矩陣 ---
-def draw_matrix(items, is_crypto):
+# --- 5. 渲染矩陣 ---
+def draw_v32(items, is_crypto):
     if not items: return
     st.divider()
     cols = st.columns(3)
     for i, s in enumerate(items):
         with cols[i % 3]:
-            data = get_analysis_stable(s)
+            data = get_analysis_v32(s)
             if data:
-                df, htf, wr, pr = data['df'], data['htf'], data['wr'], data['pr']
-                cp = df['Close'].iloc[-1]
-                atr = df['High'].iloc[-1] - df['Low'].iloc[-1]
+                df, htf, best_rr, max_p, wr = data['df'], data['htf'], data['best_rr'], data['max_p'], data['wr']
+                cp, atr = df['Close'].iloc[-1], df['High'].iloc[-1] - df['Low'].iloc[-1]
                 name = crypto_info.get(s) if is_crypto else forex_info.get(s)
+                
+                # 決定 RR
+                final_rr = user_rr if manual_rr else best_rr
                 
                 with st.container():
                     st.markdown(f"#### {s} ({name})")
-                    st.write(f"📊 勝率: {wr:.1f}% | 獲利: {pr:.1f}%")
-                    
-                    # SMC 判定邏輯
-                    fvg_bull = df['Low'].iloc[-1] - df['High'].iloc[-3]
-                    fvg_bear = df['High'].iloc[-3] - df['Low'].iloc[-1]
+                    st.write(f"🤖 **AI 推薦 R/R: {best_rr}**")
+                    st.write(f"📊 勝率: {wr:.1f}% | 獲利: {max_p:.1f}%")
                     
                     sig = None
-                    if fvg_bull > (atr*0.3) and cp > df['EMA'].iloc[-1]:
+                    if (df['Low'].iloc[-1] - df['High'].iloc[-3]) > (atr*0.3) and cp > df['EMA'].iloc[-1]:
                         sig, status = "BUY", ("🔥 強力多單" if htf==1 else "⚠️ 逆勢多單")
                         st.success(status); sl = cp - (atr * 2)
-                    elif fvg_bear > (atr*0.3) and cp < df['EMA'].iloc[-1]:
+                    elif (df['High'].iloc[-3] - df['Low'].iloc[-1]) > (atr*0.3) and cp < df['EMA'].iloc[-1]:
                         sig, status = "SELL", ("🔥 強力空單" if htf==-1 else "⚠️ 逆勢空單")
                         st.error(status); sl = cp + (atr * 2)
-                    else:
-                        st.info("🔎 監控中...")
+                    else: st.info("🔎 監控中...")
                     
                     if sig:
                         pos = (bal * (risk/100)) / abs(cp - sl)
-                        st.code(f"量:{pos:.4f}\nSL:{sl:.4f}\nTP:{cp + (cp-sl)*rr:.4f}")
-            else:
-                st.error(f"❌ {s} 數據抓取失敗")
+                        st.code(f"採用 R/R: {final_rr}\n量:{pos:.4f}\nSL:{sl:.4f}\nTP:{cp + (cp-sl)*final_rr:.4f}")
+            else: st.error(f"❌ {s} 數據抓取失敗")
             st.divider()
 
-draw_matrix(st.session_state.active_cryptos, True)
-draw_matrix(st.session_state.active_forex, False)
+draw_v32(st.session_state.active_cryptos, True)
+draw_v32(st.session_state.active_forex, False)
