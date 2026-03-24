@@ -1,7 +1,7 @@
 streamlit
-ccxt
+yfinance
 pandas
 numpy
 pytz
 streamlit-autorefresh
-yfinance
+requests
