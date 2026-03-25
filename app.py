@@ -7,20 +7,22 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. 配置 ---
-st.set_page_config(page_title="SMC Pro V51", layout="wide")
-st_autorefresh(interval=60000, key="v51_refresh") 
+st.set_page_config(page_title="SMC AI-AutoPilot V52", layout="wide")
+st_autorefresh(interval=60000, key="v52_sync") 
 tw_tz = pytz.timezone('Asia/Taipei')
 
-# --- 2. 數據對照 ---
-crypto_info = {"BTC-USD": "比特幣", "ETH-USD": "乙太幣", "SOL-USD": "索拉納"}
-forex_info = {"GC=F": "黃金期貨", "NQ=F": "納指100", "EURUSD=X": "歐美匯率", "USDJPY=X": "美日匯率"}
-all_options = {**crypto_info, **forex_info}
+# --- 2. 數據庫 ---
+all_symbols = {
+    "BTC-USD": "比特幣", "ETH-USD": "乙太幣", "SOL-USD": "索拉納",
+    "GC=F": "黃金期貨", "NQ=F": "納指100", "EURUSD=X": "歐美匯率",
+    "USDJPY=X": "美日匯率", "CL=F": "原油"
+}
 
-# --- 3. 核心追蹤引擎 (含雙 TP 邏輯) ---
+# --- 3. AI 自動診斷引擎 ---
 @st.cache_data(ttl=60)
-def get_detailed_v51(symbol, risk_p=1.0):
+def ai_auto_scan_v52(symbol, risk_p=1.0):
     try:
-        df = yf.download(symbol, period='15d', interval='1h', auto_adjust=True, progress=False)
+        df = yf.download(symbol, period='12d', interval='1h', auto_adjust=True, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df.dropna()
@@ -36,97 +38,81 @@ def get_detailed_v51(symbol, risk_p=1.0):
             if bull.iloc[i] or bear.iloc[i]:
                 entry_p, sl_dist = df['Close'].iloc[i], df['ATR'].iloc[i] * 1.5
                 res = "⏳ 運行"; prof = 0.0
-                
-                # 判定邏輯以 TP2 (3.0R) 為最終獲利基準
-                sl, tp_final = (entry_p - sl_dist, entry_p + sl_dist*3.0) if bull.iloc[i] else (entry_p + sl_dist, entry_p - sl_dist*3.0)
-                
+                sl, tp2 = (entry_p - sl_dist, entry_p + sl_dist*3) if bull.iloc[i] else (entry_p + sl_dist, entry_p - sl_dist*3)
                 for j in range(i+1, len(df)):
                     h, l = df['High'].iloc[j], df['Low'].iloc[j]
                     if bull.iloc[i]:
                         if l <= sl: res = "❌ 止損"; prof = -risk_p; break
-                        if h >= tp_final: res = "✅ 止盈"; prof = risk_p*3.0; break
+                        if h >= tp2: res = "✅ 止盈"; prof = risk_p*3; break
                     else:
                         if h >= sl: res = "❌ 止損"; prof = -risk_p; break
-                        if l <= tp_final: res = "✅ 止盈"; prof = risk_p*3.0; break
-                
-                history.append({
-                    "時間": df.index[i].strftime('%m-%d %H:%M'),
-                    "品種": symbol,
-                    "類型": "多單 📈" if bull.iloc[i] else "空單 📉",
-                    "進場價": round(entry_p, 2),
-                    "結果": res,
-                    "預估損益%": prof
-                })
-        
+                        if l <= tp2: res = "✅ 止盈"; prof = risk_p*3; break
+                history.append({"時間": df.index[i], "結果": res, "收益": prof})
+
+        # AI 統計
         v_trades = [h for h in history if h['結果'] != "⏳ 運行"]
         wr = (len([h for h in v_trades if "✅" in h['結果']]) / len(v_trades) * 100) if v_trades else 0
+        net_profit = sum([h['收益'] for h in history])
         
-        return {"df": df, "history": history, "wr": wr}
+        # AI 評級：勝率 > 30% 且 獲利為正 才推薦
+        recommend = True if (wr >= 30 and net_profit > 0) else False
+        
+        return {"df": df, "wr": wr, "net_p": net_profit, "rec": recommend, "history": history}
     except: return None
 
-# --- 4. UI 介面 ---
-st.title("🏹 SMC 終極量化終端 V51")
+# --- 4. 介面渲染 ---
+st.title("🏹 SMC AI 自動駕駛終端 V52")
+st.info("🤖 AI 正在掃描全球市場... 自動過濾低勝率品種，僅顯示「強趨勢」推薦。")
 
-# --- 橫向打勾區 ---
-st.write("### 🔍 市場監控 (手動選擇)")
-chk_cols = st.columns(len(all_options))
-active_symbols = []
-for i, (sym, name) in enumerate(all_options.items()):
-    if chk_cols[i].checkbox(f"**{sym}**", value=(sym in ["BTC-USD", "GC=F"])):
-        active_symbols.append(sym)
-
-# 側邊欄設定
+# 側邊欄：顯示所有品種狀態
 with st.sidebar:
-    st.header("⚙️ 參數設定")
-    bal = st.number_input("本金 (USD)", value=10000)
-    risk_pct = st.slider("單筆風險 (%)", 0.1, 5.0, 1.0)
-    st.divider()
-    st.write("💡 **雙止盈策略**")
-    st.caption("TP1 (1.5R): 減倉位\nTP2 (3.0R): 目標位")
+    st.header("📊 AI 市場掃描日誌")
+    total_net = 0.0
+    rec_list = []
+    watch_list = []
 
-# --- 5. 渲染即時訊號 ---
-total_history = []
+# --- 5. 執行 AI 掃描與過濾 ---
+for sym, name in all_symbols.items():
+    data = ai_auto_scan_v52(sym)
+    if data:
+        if data['rec']: rec_list.append({"sym": sym, "name": name, "data": data})
+        else: watch_list.append({"sym": sym, "name": name, "data": data})
+        total_net += data['net_p']
 
-if active_symbols:
-    st.divider()
-    sig_cols = st.columns(3)
-    for i, s in enumerate(active_symbols):
-        data = get_detailed_v51(s, risk_pct)
-        if data:
-            df, hist, wr = data['df'], data['history'], data['wr']
-            for h in hist: total_history.append(h)
-            
-            cp, atr, ema = float(df['Close'].iloc[-1]), float(df['ATR'].iloc[-1]), df['EMA'].iloc[-1]
-            
-            with sig_cols[i % 3]:
-                st.markdown(f"#### {s} ({all_options[s]})")
-                st.metric("5D 勝率", f"{wr:.1f}%")
+# --- 6. 顯示推薦交易 (勝率高) ---
+st.write("### 🔥 AI 推薦交易品種 (勝率 > 30%)")
+if rec_list:
+    cols = st.columns(3)
+    for i, item in enumerate(rec_list):
+        with cols[i % 3]:
+            d = item['data']
+            cp, atr, ema = d['df']['Close'].iloc[-1], d['df']['ATR'].iloc[-1], d['df']['EMA'].iloc[-1]
+            with st.container():
+                st.markdown(f"#### {item['sym']} ({item['name']}) ✅")
+                st.metric("5D 勝率", f"{d['wr']:.1f}%", f"淨利 {d['net_p']:+.2f}%")
                 
-                bull = (df['Low'].iloc[-1] - df['High'].iloc[-3]) > (atr*0.3) and cp > ema
-                bear = (df['High'].iloc[-3] - df['Low'].iloc[-1]) > (atr*0.3) and cp < ema
+                bull = (d['df']['Low'].iloc[-1] - d['df']['High'].iloc[-3]) > (atr*0.3) and cp > ema
+                bear = (d['df']['High'].iloc[-3] - d['df']['Low'].iloc[-1]) > (atr*0.3) and cp < ema
                 
                 if bull:
-                    st.success("🔥 多單建議")
+                    st.success("🔥 AI 多單訊號")
                     sl = cp - (atr*1.5); dist = cp - sl
-                    st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP1(1.5R): {cp+dist*1.5:,.2f}\nTP2(3.0R): {cp+dist*3.0:,.2f}")
+                    st.code(f"AI ENTRY: {cp:,.2f}\nAI SL: {sl:,.2f}\nAI TP1: {cp+dist*1.5:,.2f}\nAI TP2: {cp+dist*3:,.2f}")
                 elif bear:
-                    st.error("📉 空單建議")
+                    st.error("📉 AI 空單訊號")
                     sl = cp + (atr*1.5); dist = sl - cp
-                    st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP1(1.5R): {cp-dist*1.5:,.2f}\nTP2(3.0R): {cp-dist*3.0:,.2f}")
-                else:
-                    st.info("🔎 監控結構中...")
-                st.write(f"現價: **{cp:,.2f}**")
-        st.divider()
-
-# --- 6. 歷史紀錄大表格 ---
-st.write("### 📜 歷史戰績紀錄 (包含進場價格)")
-if total_history:
-    h_df = pd.DataFrame(total_history).sort_values(by="時間", ascending=False)
-    # 統計
-    net_profit = h_df['預估損益%'].sum()
-    st.subheader(f"💰 總預期累積收益: {net_profit:+.2f}%")
-    
-    # 格式化顯示表格
-    st.dataframe(h_df, hide_index=True, use_container_width=True)
+                    st.code(f"AI ENTRY: {cp:,.2f}\nAI SL: {sl:,.2f}\nAI TP1: {cp-dist*1.5:,.2f}\nAI TP2: {cp-dist*3:,.2f}")
+                else: st.info("🔎 結構良好，等待進場...")
 else:
-    st.info("請勾選品種以顯示數據。")
+    st.warning("目前市場震盪強烈，AI 尚未發現高勝率推薦品種，建議觀望。")
+
+# --- 7. 顯示觀察名單 (勝率低) ---
+with st.expander("👁️ 觀察名單 (最近表現不佳，AI 建議避開)"):
+    for item in watch_list:
+        st.write(f"⚠️ **{item['sym']} ({item['name']})** | 勝率: {item['data']['wr']:.1f}% | 近期淨損益: {item['data']['net_p']:+.2f}%")
+
+# 側邊欄戰績總結
+with st.sidebar:
+    st.metric("全市場 5D 總盈虧", f"{total_net:+.2f}%")
+    st.divider()
+    st.caption("AI 會自動根據數據更新推薦名單，無需手動勾選。")
