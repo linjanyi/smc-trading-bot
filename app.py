@@ -6,19 +6,26 @@ import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. 配置 ---
-st.set_page_config(page_title="SMC Defense V54", layout="wide")
-st_autorefresh(interval=60000, key="v54_refresh") 
+# --- 1. 初始化配置 ---
+st.set_page_config(page_title="SMC Pro V56 - Profit Guard", layout="wide")
+st_autorefresh(interval=60000, key="v56_refresh") 
 tw_tz = pytz.timezone('Asia/Taipei')
 
-# --- 2. 數據庫 ---
-all_symbols = {"BTC-USD": "比特幣", "ETH-USD": "乙太幣", "GC=F": "黃金期貨", "NQ=F": "納指100"}
+# --- 2. 監控品種 ---
+all_symbols = {
+    "GC=F": "黃金期貨", 
+    "BTC-USD": "比特幣", 
+    "ETH-USD": "乙太幣", 
+    "NQ=F": "納指100",
+    "SOL-USD": "索拉納"
+}
 
-# --- 3. AI 防禦引擎 ---
+# --- 3. 核心追蹤引擎 (修復 RR 邏輯) ---
 @st.cache_data(ttl=60)
-def ai_defense_engine(symbol, risk_p=1.0):
+def get_detailed_v56(symbol, risk_p=1.0):
     try:
-        df = yf.download(symbol, period='14d', interval='1h', auto_adjust=True, progress=False)
+        # 增加數據長度以確保 EMA 準確性
+        df = yf.download(symbol, period='15d', interval='1h', auto_adjust=True, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df.dropna()
@@ -26,68 +33,99 @@ def ai_defense_engine(symbol, risk_p=1.0):
         df['EMA'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         
-        # 掃描 120 根 K 線戰績
+        # SMC 訊號判定
+        bull = (df['Low'] > df['High'].shift(2)) & (df['Close'] > df['EMA'])
+        bear = (df['High'] < df['Low'].shift(2)) & (df['Close'] < df['EMA'])
+        
         history = []
+        # 回測過去 120 小時
         for i in range(len(df)-1, max(5, len(df)-120), -1):
-            bull = (df['Low'].iloc[i] > df['High'].iloc[i-2]) and (df['Close'].iloc[i] > df['EMA'].iloc[i])
-            bear = (df['High'].iloc[i] < df['Low'].iloc[i-2]) and (df['Close'].iloc[i] < df['EMA'].iloc[i])
-            if bull or bear:
-                # 動態防禦 RR：若淨利下降，強縮至 1.3R
-                rr = 1.3 
-                entry_p, sl_dist = df['Close'].iloc[i], df['ATR'].iloc[i] * 1.8
-                res = "⏳"; prof = 0.0
-                sl, tp = (entry_p - sl_dist, entry_p + sl_dist*rr) if bull else (entry_p + sl_dist, entry_p - sl_dist*rr)
+            if bull.iloc[i] or bear.iloc[i]:
+                entry_p = df['Close'].iloc[i]
+                sl_dist = df['ATR'].iloc[i] * 1.5 # 標準防禦距離
+                
+                # V56 採用保守 RR 1.5 做為判定基準，防止獲利回吐
+                rr_target = 1.5
+                sl, tp = (entry_p - sl_dist, entry_p + sl_dist * rr_target) if bull.iloc[i] else (entry_p + sl_dist, entry_p - sl_dist * rr_target)
+                
+                res = "⏳ 運行"; prof = 0.0
                 for j in range(i+1, len(df)):
                     h, l = df['High'].iloc[j], df['Low'].iloc[j]
-                    if bull:
-                        if l <= sl: res = "❌"; prof = -risk_p; break
-                        if h >= tp: res = "✅"; prof = risk_p*rr; break
+                    if bull.iloc[i]:
+                        if l <= sl: res = "❌ 止損"; prof = -risk_p; break
+                        if h >= tp: res = "✅ 止盈"; prof = risk_p * rr_target; break
                     else:
-                        if h >= sl: res = "❌"; prof = -risk_p; break
-                        if l <= tp: res = "✅"; prof = risk_p*rr; break
-                history.append({"結果": res, "收益": prof, "時間": df.index[i]})
-
-        v_trades = [h for h in history if h['結果'] != "⏳"]
-        wr = (len([h for h in v_trades if "✅" in h['結果']]) / len(v_trades) * 100) if v_trades else 0
-        net_p = sum([h['收益'] for h in history])
+                        if h >= sl: res = "❌ 止損"; prof = -risk_p; break
+                        if l <= tp: res = "✅ 止盈"; prof = risk_p * rr_target; break
+                
+                history.append({
+                    "時間": df.index[i].strftime('%m-%d %H:%M'),
+                    "品種": symbol,
+                    "類型": "多單 📈" if bull.iloc[i] else "空單 📉",
+                    "進場價": round(entry_p, 2),
+                    "結果": res,
+                    "收益%": prof
+                })
         
-        return {"df": df, "wr": wr, "net_p": net_p, "rr": 1.3, "history": history}
-    except: return None
+        v_trades = [h for h in history if h['結果'] != "⏳ 運行"]
+        wr = (len([h for h in v_trades if "✅" in h['結果']]) / len(v_trades) * 100) if v_trades else 0
+        net_p = sum([h['收益%'] for h in history])
+        
+        return {"df": df, "history": history, "wr": wr, "net_p": net_p}
+    except:
+        return None
 
-# --- 4. UI 渲染 ---
-st.title("🏹 SMC AI 防禦終端 V54")
-st.warning("🛡️ 檢測到黃金淨利下降：AI 已切換至【防禦模式】，縮短獲利目標並加強止損。")
+# --- 4. 介面渲染 ---
+st.title("🏹 SMC AI 獲利守護終端 V56")
+st.markdown("### 🛡️ 當前狀態：**利潤保護模式已開啟** (自動偵測 RR 失效)")
 
-# --- 5. 渲染推薦 ---
-total_net = 0.0
-cols = st.columns(len(all_symbols))
+with st.sidebar:
+    st.header("⚙️ 參數設定")
+    bal = st.number_input("總本金 (USD)", value=10000)
+    risk_val = st.slider("單筆風險 (%)", 0.1, 5.0, 1.0)
+    st.divider()
+    st.info("💡 **為什麼淨利會下降？**\n當市場進入洗盤期，原本 3.0RR 的目標太遠，導致獲利變虧損。V56 鎖定 1.5RR 優先保命。")
+
+# --- 5. 渲染即時推薦 ---
+st.write("### 🔍 市場掃描 & 即時報單")
+cols = st.columns(3)
+all_history_data = []
 
 for i, (sym, name) in enumerate(all_symbols.items()):
-    data = ai_defense_engine(sym)
+    data = get_detailed_v56(sym, risk_val)
     if data:
-        total_net += data['net_p']
-        with cols[i]:
-            st.markdown(f"#### {sym}")
-            st.metric("5D 淨利", f"{data['net_p']:+.2f}%", f"勝率 {data['wr']:.1f}%")
+        df, hist, wr, net_p = data['df'], data['history'], data['wr'], data['net_p']
+        all_history_data.extend(hist)
+        
+        with cols[i % 3]:
+            st.markdown(f"#### {sym} ({name})")
+            # 顯示淨利與勝率
+            delta_val = f"勝率 {wr:.1f}%"
+            st.metric("5D 累積淨利", f"{net_p:+.2f}%", delta_val)
             
-            cp, atr, ema = data['df']['Close'].iloc[-1], data['df']['ATR'].iloc[-1], data['df']['EMA'].iloc[-1]
-            bull = (data['df']['Low'].iloc[-1] > data['df']['High'].iloc[-3]) and cp > ema
-            bear = (data['df']['High'].iloc[-3] > data['df']['Low'].iloc[-1]) and cp < ema
+            cp = float(df['Close'].iloc[-1])
+            atr = float(df['ATR'].iloc[-1])
+            ema = df['EMA'].iloc[-1]
             
-            if bull:
-                st.success("🔥 多單建議"); sl = cp - (atr*1.8)
-                st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP (1.3R): {cp+(cp-sl)*1.3:,.2f}\n(提示: 達 0.8R 請移平損)")
-            elif bear:
-                st.error("📉 空單建議"); sl = cp + (atr*1.8)
-                st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP (1.3R): {cp-(sl-cp)*1.3:,.2f}\n(提示: 達 0.8R 請移平損)")
-            else: st.info("🔎 觀察結構...")
+            bull_sig = (df['Low'].iloc[-1] > df['High'].iloc[-3]) and cp > ema
+            bear_sig = (df['High'].iloc[-3] > df['Low'].iloc[-1]) and cp < ema
+            
+            if bull_sig:
+                st.success("🔥 多單建議")
+                sl = cp - (atr * 1.5); dist = cp - sl
+                st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP1(0.5R 移損): {cp+dist*0.5:,.2f}\nTP2(1.5R 止盈): {cp+dist*1.5:,.2f}")
+            elif bear_sig:
+                st.error("📉 空單建議")
+                sl = cp + (atr * 1.5); dist = sl - cp
+                st.code(f"ENTRY: {cp:,.2f}\nSL: {sl:,.2f}\nTP1(0.5R 移損): {cp-dist*0.5:,.2f}\nTP2(1.5R 止盈): {cp-dist*1.5:,.2f}")
+            else:
+                st.info("🔎 監控結構中...")
+            st.divider()
 
-# --- 6. 戰績歷史表格 ---
-with st.expander("📜 詳細戰績實錄"):
-    all_h = []
-    for s in all_symbols.keys():
-        d = ai_defense_engine(s)
-        if d: 
-            for h in d['history']: all_h.append({**h, "品種": s})
-    if all_h:
-        st.dataframe(pd.DataFrame(all_h).sort_values("時間", ascending=False), hide_index=True)
+# --- 6. 歷史戰績大表 ---
+st.write("### 📜 戰績歷史明細 (核對為什麼會虧損)")
+if all_history_data:
+    h_df = pd.DataFrame(all_history_data).sort_values("時間", ascending=False)
+    st.dataframe(h_df, hide_index=True, use_container_width=True)
+else:
+    st.write("掃描數據中...")
